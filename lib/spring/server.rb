@@ -86,7 +86,17 @@ module Spring
     # This will cause it to be automatically killed once the session
     # ends (i.e. when the user closes their terminal).
     def set_pgid
-      pgid = Process.getpgid(Process.getsid)
+      sid = Process.getsid
+      pgid = Process.getpgid(sid)
+      puts "sid: #{sid}, pgid: #{pgid}"
+
+      begin
+        pgid = ENV['CI'] ? sid : pgid
+      rescue Errno::ESRCH
+        # On some systems (e.g., CI environments), getpgid may fail
+        # if there's no process group. Fall back to using session ID.
+        pgid = sid
+      end
       Process.setpgid(0, pgid)
     end
 

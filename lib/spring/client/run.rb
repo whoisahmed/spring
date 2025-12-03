@@ -52,7 +52,25 @@ module Spring
 
       def cold_run
         boot_server
-        connect
+        begin
+          connect
+        rescue Errno::ENOENT, Errno::ECONNRESET, Errno::ECONNREFUSED => e
+          # Socket might not exist yet or server crashed during boot
+          # This can happen in CI environments with multiple workers
+          # where one worker starts the server but another worker's socket
+          # path differs or the server died
+          if env.socket_path.exist? && server_alive?
+            # Socket exists and server is alive, but connection failed
+            # Wait a bit more for server to be ready
+            sleep 0.2
+            retry
+          else
+            # Server died or socket missing - clean up and exit
+            # Don't retry booting as it might cause conflicts with other workers
+            $stderr.puts "Spring server connection failed: #{e.message}"
+            exit 1
+          end
+        end
         run
       end
 
@@ -76,6 +94,7 @@ module Spring
 
         @server_booted = true
 
+        # Wait for socket file to exist
         until env.socket_path.exist?
           _, status = Process.waitpid2(pid, Process::WNOHANG)
 
@@ -88,6 +107,17 @@ module Spring
           end
 
           sleep 0.1
+        end
+
+        # Give the server a moment to start listening after socket file is created
+        # The socket file may exist before the server calls UNIXServer.open
+        sleep 0.1
+
+        # Verify server process is still alive and hasn't crashed
+        _, status = Process.waitpid2(pid, Process::WNOHANG)
+        if status
+          $stderr.puts "Spring server exited with status #{status.exitstatus} during startup"
+          exit status.exitstatus
         end
       end
 
@@ -117,6 +147,15 @@ module Spring
         server.close
         @server = nil
         env.stop
+      end
+
+      def server_alive?
+        return false unless env.pid
+
+        Process.kill(0, env.pid)
+        true
+      rescue Errno::ESRCH, Errno::EPERM
+        false
       end
 
       def verify_server_version
